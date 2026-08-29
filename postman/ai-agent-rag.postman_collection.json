@@ -1,0 +1,401 @@
+{
+  "info": {
+    "_postman_id": "8f2a4d61-5c9e-4b3a-9d10-7e6c2b4a1f30",
+    "name": "AI Agent — RAG API",
+    "description": "Document ingestion and vector search for the AI Agent Service (`/api/rag`).\n\n## Before you start\n\n1. Set the collection variable `base_url` (default `http://localhost:8000`).\n2. Set `agent_api_token` to the value of **AGENT_API_TOKEN** in your `.env`.\n   Note: that file defines the key twice — the LAST occurrence is the one the\n   service uses. Copying the wrong one gives `401 Invalid or missing bearer token`.\n\nAuth is set once on the collection (Bearer) and inherited by every request, so\nno request carries its own header.\n\n## Order to run in\n\n**Service health** → **Upload document** (captures `document_id` automatically)\n→ **Search** / **Context** → **List** → **Delete**.\n\nThe upload request needs a real file: open its Body tab and select one, since\nPostman cannot store file contents inside a collection.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{agent_api_token}}", "type": "string" }]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string",
+      "description": "Where the service is listening."
+    },
+    {
+      "key": "agent_api_token",
+      "value": "",
+      "type": "string",
+      "description": "AGENT_API_TOKEN from .env — the LAST occurrence of the key."
+    },
+    {
+      "key": "document_id",
+      "value": "",
+      "type": "string",
+      "description": "Set automatically by Upload document; used by Get and Delete."
+    },
+    {
+      "key": "query",
+      "value": "What is the refund policy?",
+      "type": "string",
+      "description": "The question the search and context requests ask."
+    }
+  ],
+  "item": [
+    {
+      "name": "0 · Service health (no auth)",
+      "request": {
+        "auth": { "type": "noauth" },
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{base_url}}/health", "host": ["{{base_url}}"], "path": ["health"] },
+        "description": "The pre-existing liveness probe. Unauthenticated — if this fails, the service is down rather than the token being wrong."
+      },
+      "response": []
+    },
+    {
+      "name": "1 · RAG health",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));",
+              "",
+              "const body = pm.response.json();",
+              "console.log('database:', JSON.stringify(body.database));",
+              "console.log('embeddings:', JSON.stringify(body.embeddings));",
+              "",
+              "// ok is false until BOTH halves are ready, so it is the one flag to read.",
+              "pm.test('RAG layer is usable', () => pm.expect(body.ok).to.be.true);",
+              "pm.test('model width matches the pgvector column', () =>",
+              "    pm.expect(body.embeddings.dimension).to.eql(body.database.column_dimension));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{base_url}}/api/rag/health", "host": ["{{base_url}}"], "path": ["api", "rag", "health"] },
+        "description": "Whether the RAG layer is usable, and why not if it is not.\n\nReports configuration names and numbers only — never a DSN, never a key.\nAlways answers 200, including when unusable: a non-200 here would read as the whole service being down.\n\n- `database.schema_ready` false ⇒ run `python -m app.rag.migrate`\n- `embeddings.loaded` false ⇒ the embedding server is unreachable or misconfigured\n- `ok` true ⇒ uploads and searches will work"
+      },
+      "response": []
+    },
+    {
+      "name": "2 · Upload document",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 Created', () => pm.response.to.have.status(201));",
+              "",
+              "const body = pm.response.json();",
+              "pm.collectionVariables.set('document_id', body.document_id);",
+              "console.log(`${body.filename}: ${body.chunks} chunks, ${body.characters} chars, ` +",
+              "            `${body.embedding_model} ${body.embedding_dim}-d, ${body.took_ms} ms`);",
+              "",
+              "pm.test('chunks were stored', () => pm.expect(body.chunks).to.be.above(0));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": [],
+              "description": "REQUIRED. A .pdf, .docx or .txt. Open this tab and select the file — Postman cannot store file contents in a collection."
+            },
+            {
+              "key": "document_id",
+              "value": "",
+              "type": "text",
+              "disabled": true,
+              "description": "Optional. Your own id (a Laravel media id, a hash). Generated when omitted. Re-using an existing id is a primary-key conflict — delete first."
+            },
+            {
+              "key": "user_id",
+              "value": "",
+              "type": "text",
+              "disabled": true,
+              "description": "Optional scope. Searches can be filtered by it later."
+            },
+            {
+              "key": "agent_id",
+              "value": "",
+              "type": "text",
+              "disabled": true,
+              "description": "Optional scope."
+            },
+            {
+              "key": "conversation_id",
+              "value": "",
+              "type": "text",
+              "disabled": true,
+              "description": "Optional scope."
+            },
+            {
+              "key": "metadata",
+              "value": "{\"tenant\":\"acme\"}",
+              "type": "text",
+              "disabled": true,
+              "description": "Optional JSON OBJECT, sent as a string because multipart cannot carry JSON. Anything else is a 422."
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{base_url}}/api/rag/documents/upload",
+          "host": ["{{base_url}}"],
+          "path": ["api", "rag", "documents", "upload"]
+        },
+        "description": "Ingest one document: extract → clean → chunk → embed → store.\n\nOnly `file` is required; the four optional fields are disabled by default — enable the ones you actually scope by.\n\nSynchronous by design: the response tells you how many chunks were stored, and a failure is a failed request rather than a job that quietly never finished. A large PDF therefore takes as long as it takes to embed.\n\n**Status codes**\n\n| | |\n| --- | --- |\n| 201 | Ingested |\n| 400 | Unsupported file type (only pdf, docx, txt) |\n| 413 | Larger than `RAG_MAX_UPLOAD_MB` |\n| 422 | Empty file, no extractable text, or bad `metadata` JSON |\n| 502 | The embedding backend failed |\n| 503 | `RAG_DATABASE_URL` unset, or the parser is not installed |\n\nA scanned PDF gives 422: it holds images, not text, and OCR is not enabled."
+      },
+      "response": [
+        {
+          "name": "201 — ingested",
+          "originalRequest": {
+            "method": "POST",
+            "header": [],
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] },
+            "url": { "raw": "{{base_url}}/api/rag/documents/upload", "host": ["{{base_url}}"], "path": ["api", "rag", "documents", "upload"] }
+          },
+          "status": "Created",
+          "code": 201,
+          "_postman_previewlanguage": "json",
+          "header": [{ "key": "Content-Type", "value": "application/json" }],
+          "cookie": [],
+          "body": "{\n  \"document_id\": \"doc_9f2c1b7e5a4d4c1fa1b2c3d4e5f60718\",\n  \"filename\": \"company-policy.pdf\",\n  \"file_type\": \"pdf\",\n  \"chunks\": 34,\n  \"characters\": 21877,\n  \"pages\": 12,\n  \"embedding_model\": \"BAAI/bge-m3\",\n  \"embedding_dim\": 1024,\n  \"took_ms\": 2841,\n  \"metadata\": {\n    \"tenant\": \"acme\"\n  }\n}"
+        },
+        {
+          "name": "400 — unsupported file type",
+          "originalRequest": {
+            "method": "POST",
+            "header": [],
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] },
+            "url": { "raw": "{{base_url}}/api/rag/documents/upload", "host": ["{{base_url}}"], "path": ["api", "rag", "documents", "upload"] }
+          },
+          "status": "Bad Request",
+          "code": 400,
+          "_postman_previewlanguage": "json",
+          "header": [{ "key": "Content-Type", "value": "application/json" }],
+          "cookie": [],
+          "body": "{\n  \"detail\": \"Unsupported file type 'zip'. Supported: pdf, docx, txt\"\n}"
+        }
+      ]
+    },
+    {
+      "name": "3 · Search",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));",
+              "",
+              "const body = pm.response.json();",
+              "console.log(`found=${body.found}  threshold=${body.threshold}  ${body.took_ms} ms`);",
+              "body.results.forEach(r =>",
+              "    console.log(`  ${r.similarity.toFixed(3)}  [${r.metadata.source}` +",
+              "                `${r.metadata.page ? ', p' + r.metadata.page : ''}]  ` +",
+              "                r.content.slice(0, 70)));",
+              "",
+              "// found=false is a valid answer, not a failure: nothing reached the",
+              "// threshold. The calling agent decides what to do about it.",
+              "pm.test('every result is above the threshold', () =>",
+              "    body.results.forEach(r => pm.expect(r.similarity).to.be.at.least(body.threshold)));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"query\": \"{{query}}\",\n  \"top_k\": 5\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": { "raw": "{{base_url}}/api/rag/search", "host": ["{{base_url}}"], "path": ["api", "rag", "search"] },
+        "description": "Embed the query, rank chunks in Postgres, return those above the threshold.\n\n**No LLM is called.** This returns chunks, not an answer.\n\n**Optional fields** (add to the body as needed)\n\n```json\n{\n  \"query\": \"What is the refund policy?\",\n  \"top_k\": 5,\n  \"threshold\": 0.5,\n  \"user_id\": \"42\",\n  \"agent_id\": \"support\",\n  \"conversation_id\": \"c-1\",\n  \"document_ids\": [\"doc_9f2c…\"]\n}\n```\n\n- `top_k` — defaults to `RAG_TOP_K`, capped at `RAG_MAX_TOP_K` (50). 0 or negative is a 422.\n- `threshold` — overrides `RAG_SIMILARITY_THRESHOLD` for this call. 0 disables the filter, which is the quickest way to see the raw scores while tuning.\n- the scope fields and `document_ids` narrow the search; omit them to search everything.\n\n**On the scores:** BGE-M3 similarities sit in a narrow band — a correct match is around 0.6, not 0.9, and unrelated text still scores about 0.4. Set the threshold between those two clusters, measured on your own documents.\n\n**Status codes** — 422 empty query or bad `top_k` · 502 embedding backend · 503 storage not configured."
+      },
+      "response": [
+        {
+          "name": "200 — found",
+          "originalRequest": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"query\": \"What is the refund policy?\",\n  \"top_k\": 5\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/api/rag/search", "host": ["{{base_url}}"], "path": ["api", "rag", "search"] }
+          },
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "json",
+          "header": [{ "key": "Content-Type", "value": "application/json" }],
+          "cookie": [],
+          "body": "{\n  \"query\": \"What is the refund policy?\",\n  \"found\": true,\n  \"results\": [\n    {\n      \"chunk_id\": \"0f1c8a3e-7b21-4d55-9a0e-1c2d3e4f5a6b\",\n      \"document_id\": \"doc_9f2c1b7e5a4d4c1fa1b2c3d4e5f60718\",\n      \"content\": \"Refunds are available within 30 days of purchase, provided the item is unused…\",\n      \"similarity\": 0.606,\n      \"metadata\": {\n        \"source\": \"company-policy.pdf\",\n        \"page\": 4,\n        \"chunk_index\": 12,\n        \"document_id\": \"doc_9f2c1b7e5a4d4c1fa1b2c3d4e5f60718\"\n      }\n    }\n  ],\n  \"threshold\": 0.5,\n  \"top_k\": 5,\n  \"took_ms\": 38\n}"
+        },
+        {
+          "name": "200 — nothing relevant",
+          "originalRequest": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"query\": \"Do you sell bicycles?\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/api/rag/search", "host": ["{{base_url}}"], "path": ["api", "rag", "search"] }
+          },
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "json",
+          "header": [{ "key": "Content-Type", "value": "application/json" }],
+          "cookie": [],
+          "body": "{\n  \"query\": \"Do you sell bicycles?\",\n  \"found\": false,\n  \"results\": [],\n  \"threshold\": 0.5,\n  \"top_k\": 5,\n  \"took_ms\": 31\n}"
+        }
+      ]
+    },
+    {
+      "name": "4 · Context (prompt-ready)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));",
+              "",
+              "const body = pm.response.json();",
+              "console.log(`found=${body.found}  chunks_used=${body.chunks_used}  ` +",
+              "            `${body.context.length} chars`);",
+              "console.log(body.context);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"query\": \"{{query}}\",\n  \"top_k\": 5\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": { "raw": "{{base_url}}/api/rag/context", "host": ["{{base_url}}"], "path": ["api", "rag", "context"] },
+        "description": "The same retrieval as Search, assembled into one block of text with its sources.\n\nAccepts everything Search accepts, plus `max_chars` (defaults to `RAG_CONTEXT_MAX_CHARS`).\n\nChunks are numbered and labelled — `[1] policy.pdf, page 4` — so a prompt can cite them and the model can tell two documents apart inside one block. Whole chunks only: a chunk that would exceed the budget is dropped rather than truncated, because half a sentence in a prompt reads as a fact that was never written.\n\n**This endpoint calls no LLM and touches no agent code.** It exists so the existing agent can fetch context when it decides to — paste `context` into your system prompt, or send it in the `context` field of `/agent/reply`."
+      },
+      "response": [
+        {
+          "name": "200 — context assembled",
+          "originalRequest": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"query\": \"What is the refund policy?\",\n  \"top_k\": 5\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/api/rag/context", "host": ["{{base_url}}"], "path": ["api", "rag", "context"] }
+          },
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "json",
+          "header": [{ "key": "Content-Type", "value": "application/json" }],
+          "cookie": [],
+          "body": "{\n  \"query\": \"What is the refund policy?\",\n  \"found\": true,\n  \"context\": \"[1] company-policy.pdf, page 4\\nRefunds are available within 30 days of purchase…\",\n  \"sources\": [\n    {\n      \"document_id\": \"doc_9f2c1b7e5a4d4c1fa1b2c3d4e5f60718\",\n      \"source\": \"company-policy.pdf\",\n      \"page\": 4,\n      \"chunk_index\": 12,\n      \"similarity\": 0.606\n    }\n  ],\n  \"chunks_used\": 3,\n  \"took_ms\": 41\n}"
+        }
+      ]
+    },
+    {
+      "name": "5 · List documents",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));",
+              "",
+              "const body = pm.response.json();",
+              "console.log(`${body.documents.length} of ${body.total} documents`);",
+              "body.documents.forEach(d =>",
+              "    console.log(`  ${d.filename}  ${d.file_type}  chunks=${d.chunk_count}  ${d.created_at}`));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/rag/documents?limit=50&offset=0",
+          "host": ["{{base_url}}"],
+          "path": ["api", "rag", "documents"],
+          "query": [
+            { "key": "limit", "value": "50", "description": "1–200. Default 50." },
+            { "key": "offset", "value": "0", "description": "For paging." },
+            { "key": "user_id", "value": "", "disabled": true },
+            { "key": "agent_id", "value": "", "disabled": true },
+            { "key": "conversation_id", "value": "", "disabled": true }
+          ]
+        },
+        "description": "Documents, newest first, paginated.\n\n`total` is the count for the same filter, not for the page — page through with `offset`."
+      },
+      "response": []
+    },
+    {
+      "name": "6 · Get one document",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/rag/documents/{{document_id}}",
+          "host": ["{{base_url}}"],
+          "path": ["api", "rag", "documents", "{{document_id}}"]
+        },
+        "description": "One document record. `{{document_id}}` is set automatically by the Upload request.\n\n404 if it does not exist."
+      },
+      "response": []
+    },
+    {
+      "name": "7 · Delete document",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));",
+              "",
+              "const body = pm.response.json();",
+              "console.log(`deleted ${body.document_id} with ${body.chunks_deleted} chunks`);",
+              "pm.collectionVariables.set('document_id', '');"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/rag/documents/{{document_id}}",
+          "host": ["{{base_url}}"],
+          "path": ["api", "rag", "documents", "{{document_id}}"]
+        },
+        "description": "Delete the document, its chunks and their embeddings.\n\nOne transaction: either all of it goes or none of it does. A half-deleted document would leave chunks that still answer searches while their document record no longer exists.\n\n404 if the id is unknown."
+      },
+      "response": [
+        {
+          "name": "200 — deleted",
+          "originalRequest": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/rag/documents/{{document_id}}", "host": ["{{base_url}}"], "path": ["api", "rag", "documents", "{{document_id}}"] }
+          },
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "json",
+          "header": [{ "key": "Content-Type", "value": "application/json" }],
+          "cookie": [],
+          "body": "{\n  \"ok\": true,\n  \"document_id\": \"doc_9f2c1b7e5a4d4c1fa1b2c3d4e5f60718\",\n  \"chunks_deleted\": 34\n}"
+        }
+      ]
+    }
+  ]
+}

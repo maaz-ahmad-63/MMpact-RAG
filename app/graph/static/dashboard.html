@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Dashboard</title>
+
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel-2:#1e222b; --line:#2a2f3a;
+    --text:#e6e9ef; --muted:#98a1b3; --accent:#5b8cff;
+    --ok:#3fbf7f; --warn:#e0a33e; --bad:#e2565a;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+    padding:14px 20px; border-bottom:1px solid var(--line); background:var(--panel);
+    position:sticky; top:0; z-index:10;
+  }
+  h1 { font-size:15px; margin:0; font-weight:600; letter-spacing:.2px; }
+  nav { display:flex; gap:4px; flex-wrap:wrap; }
+  nav button {
+    background:transparent; border:1px solid transparent; color:var(--muted);
+    padding:6px 12px; border-radius:7px; cursor:pointer; font-size:13px;
+  }
+  nav button:hover { color:var(--text); background:var(--panel-2); }
+  nav button.active { color:var(--text); background:var(--panel-2); border-color:var(--line); }
+  .spacer { flex:1; }
+  input[type=password], input[type=text], select {
+    background:var(--panel-2); border:1px solid var(--line); color:var(--text);
+    padding:6px 10px; border-radius:7px; font-size:13px;
+  }
+  main { padding:20px; max-width:1400px; margin:0 auto; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  .card .label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.6px; }
+  .card .value { font-size:26px; font-weight:600; margin-top:6px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; margin-top:18px; overflow:hidden; }
+  .panel > h2 { font-size:13px; margin:0; padding:12px 16px; border-bottom:1px solid var(--line); color:var(--muted); text-transform:uppercase; letter-spacing:.6px; }
+  .scroll { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--muted); font-weight:500; font-size:12px; }
+  tr.clickable:hover { background:var(--panel-2); cursor:pointer; }
+  td.wrap { white-space:normal; max-width:420px; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:20px; font-size:11px; border:1px solid var(--line); }
+  .ok { color:var(--ok); border-color:rgba(63,191,127,.4); }
+  .bad { color:var(--bad); border-color:rgba(226,86,90,.4); }
+  .warn { color:var(--warn); border-color:rgba(224,163,62,.4); }
+  .mono { font-family:var(--mono); font-size:12px; }
+  .muted { color:var(--muted); }
+  details { border-top:1px solid var(--line); }
+  details > summary { padding:10px 16px; cursor:pointer; display:flex; gap:10px; align-items:center; }
+  details > summary::-webkit-details-marker { display:none; }
+  details > summary:hover { background:var(--panel-2); }
+  .step-body { padding:0 16px 14px 16px; }
+  pre {
+    background:var(--panel-2); border:1px solid var(--line); border-radius:8px;
+    padding:10px 12px; overflow-x:auto; font-family:var(--mono); font-size:12px; margin:8px 0 0 0;
+  }
+  .kv { display:grid; grid-template-columns:max-content 1fr; gap:4px 18px; font-size:13px; }
+  .kv div:nth-child(odd) { color:var(--muted); }
+  .notice { padding:16px; color:var(--muted); }
+  .bar { height:6px; background:var(--panel-2); border-radius:3px; overflow:hidden; }
+  .bar > i { display:block; height:100%; background:var(--accent); }
+  button.link { background:none; border:none; color:var(--accent); cursor:pointer; padding:0; font-size:13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Agent Dashboard</h1>
+  <nav id="nav"></nav>
+  <span class="spacer"></span>
+  <label class="muted" style="font-size:12px">window
+    <select id="window">
+      <option value="1">1h</option>
+      <option value="24" selected>24h</option>
+      <option value="168">7d</option>
+      <option value="720">30d</option>
+    </select>
+  </label>
+  <label class="muted" style="font-size:12px"><input type="checkbox" id="live"> live</label>
+  <input type="password" id="token" placeholder="bearer token" size="18">
+</header>
+<main id="view"><div class="notice">Loading…</div></main>
+
+<script>
+"use strict";
+
+const PAGES = [
+  ["overview", "Overview"],
+  ["runs",     "Runs"],
+  ["rag",      "RAG"],
+  ["tools",    "Tools"],
+  ["models",   "Models"],
+  ["errors",   "Errors"],
+];
+
+const state = { page: "overview", runId: null, timer: null };
+const view   = document.getElementById("view");
+const tokenInput = document.getElementById("token");
+const windowSel  = document.getElementById("window");
+const liveBox    = document.getElementById("live");
+
+// sessionStorage, not localStorage: the token dies with the tab rather than
+// persisting on a shared machine.
+tokenInput.value = sessionStorage.getItem("agentToken") || "";
+tokenInput.addEventListener("change", () => {
+  sessionStorage.setItem("agentToken", tokenInput.value);
+  render();
+});
+windowSel.addEventListener("change", render);
+liveBox.addEventListener("change", setupLive);
+
+const esc = (value) =>
+  String(value ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+
+const ms  = (value) => (value == null ? "—" : value + " ms");
+const pct = (value) => (value == null ? "—" : Math.round(value * 100) + "%");
+const when = (value) => (value ? new Date(value).toLocaleString() : "—");
+
+async function api(path) {
+  const response = await fetch("/api/v1/dashboard" + path, {
+    headers: tokenInput.value ? { Authorization: "Bearer " + tokenInput.value } : {},
+  });
+  if (response.status === 401) throw new Error("Unauthorized — enter the bearer token above.");
+  if (response.status === 503) throw new Error((await response.json()).detail || "Storage unavailable");
+  if (!response.ok) throw new Error("HTTP " + response.status + " on " + path);
+  return response.json();
+}
+
+function statusPill(value) {
+  const klass = value === "completed" || value === "ok" ? "ok"
+              : value === "running" ? "warn" : "bad";
+  return `<span class="pill ${klass}">${esc(value)}</span>`;
+}
+
+function table(columns, rows, rowAttributes) {
+  if (!rows.length) return `<div class="notice">Nothing recorded in this window.</div>`;
+  const head = columns.map((c) => `<th>${esc(c.label)}</th>`).join("");
+  const body = rows.map((row) => {
+    const cells = columns.map((c) =>
+      `<td class="${c.class || ""}">${c.render ? c.render(row) : esc(row[c.key])}</td>`).join("");
+    return `<tr ${rowAttributes ? rowAttributes(row) : ""}>${cells}</tr>`;
+  }).join("");
+  return `<div class="scroll"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+// -- pages ------------------------------------------------------------------
+
+async function pageOverview() {
+  const hours = windowSel.value;
+  const data  = await api("/overview?hours=" + hours);
+  const cards = [
+    ["Total Requests",  data.total_requests],
+    ["Successful",      data.successful],
+    ["Failed",          data.failed],
+    ["RAG Requests",    data.rag_requests],
+    ["Direct Answers",  data.direct_answers],
+    ["Tool Calls",      data.tool_calls],
+    ["Human Handoffs",  data.human_handoffs],
+    ["Average Latency", data.average_latency_ms + " ms"],
+    ["Tokens In",       data.input_tokens],
+    ["Tokens Out",      data.output_tokens],
+  ].map(([label, value]) =>
+    `<div class="card"><div class="label">${label}</div><div class="value">${esc(value)}</div></div>`
+  ).join("");
+
+  const recent = await api("/runs?limit=10");
+  return `<div class="cards">${cards}</div>
+    <div class="panel"><h2>Latest runs</h2>${runTable(recent.runs)}</div>`;
+}
+
+function runTable(runs) {
+  return table([
+    { key:"run_id", label:"Run ID", class:"mono",
+      render:(r)=>`<span class="mono">${esc(r.run_id.slice(0,14))}…</span>` },
+    { key:"conversation_id", label:"Conversation", class:"mono",
+      render:(r)=>`<span class="mono muted">${esc((r.conversation_id||"—").slice(0,14))}</span>` },
+    { key:"intent", label:"Intent" },
+    { key:"action", label:"Action" },
+    { key:"model_name", label:"Model", class:"mono",
+      render:(r)=>`<span class="mono">${esc(r.model_provider||"—")}:${esc(r.model_name||"—")}</span>` },
+    { key:"used_rag", label:"RAG", render:(r)=>r.used_rag ? "yes" : "no" },
+    { key:"total_tokens", label:"Tokens",
+      render:(r)=>`<span class="mono">${r.input_tokens||0}/${r.output_tokens||0}</span>` },
+    { key:"latency_ms", label:"Duration", render:(r)=>ms(r.latency_ms) },
+    { key:"status", label:"Status", render:(r)=>statusPill(r.status) },
+    { key:"started_at", label:"Created", render:(r)=>when(r.started_at) },
+  ], runs, (r)=>`class="clickable" onclick="openRun('${esc(r.run_id)}')"`);
+}
+
+async function pageRuns() {
+  const data = await api("/runs?limit=100");
+  return `<div class="panel"><h2>Agent runs (${data.total})</h2>${runTable(data.runs)}</div>`;
+}
+
+async function pageRunDetail(runId) {
+  const data = await api("/runs/" + encodeURIComponent(runId));
+  const run  = data.run;
+
+  const summary = `
+    <div class="panel"><h2>Run ${esc(run.run_id)}</h2>
+      <div style="padding:14px 16px" class="kv">
+        <div>Status</div><div>${statusPill(run.status)}</div>
+        <div>Conversation</div><div class="mono">${esc(run.conversation_id||"—")}</div>
+        <div>User</div><div class="mono">${esc(run.user_id||"—")}</div>
+        <div>Client</div><div class="mono">${esc(run.client_id||"—")}</div>
+        <div>Provider</div><div>${esc(run.model_provider||"—")}</div>
+        <div>Model</div><div class="mono">${esc(run.model_name||"—")}</div>
+        <div>Intent</div><div>${esc(run.intent||"—")}</div>
+        <div>Action</div><div>${esc(run.action||"—")}</div>
+        <div>Confidence</div><div>${pct(run.confidence)}</div>
+        <div>RAG required</div><div>${run.used_rag ? "yes" : "no"}</div>
+        <div>Duration</div><div>${ms(run.latency_ms)}</div>
+        <div>Tokens</div><div class="mono">${run.input_tokens||0} in / ${run.output_tokens||0} out
+          = ${run.total_tokens||0} total</div>
+        <div>Started</div><div>${when(run.started_at)}</div>
+        ${run.error ? `<div>Error</div><div class="bad">${esc(run.error)}</div>` : ""}
+      </div>
+    </div>`;
+
+  const conversation = `
+    <div class="panel"><h2>Message → response</h2>
+      <div style="padding:14px 16px">
+        <div class="muted" style="font-size:12px">USER MESSAGE</div>
+        <pre>${esc(run.user_message||"")}</pre>
+        <div class="muted" style="font-size:12px;margin-top:14px">FINAL RESPONSE</div>
+        <pre>${esc(data.final_answer||"")}</pre>
+      </div>
+    </div>`;
+
+  // The execution timeline. One <details> per node, expandable, in order —
+  // this is the "USER MESSAGE → INTENT → ROUTER → RAG/TOOL → ANSWER" view.
+  const steps = data.steps.map((step) => `
+    <details>
+      <summary>
+        <span class="pill ${step.status === "ok" ? "ok" : "bad"}">${esc(step.step_number)}</span>
+        <strong>${esc(step.node_name)}</strong>
+        <span class="muted">${esc(step.step_type)}</span>
+        <span class="spacer" style="flex:1"></span>
+        <span class="muted mono">${ms(step.latency_ms)}</span>
+      </summary>
+      <div class="step-body">
+        ${step.error ? `<div class="bad">${esc(step.error)}</div>` : ""}
+        <pre>${esc(JSON.stringify(step.metadata, null, 2))}</pre>
+      </div>
+    </details>`).join("");
+
+  const searches = data.rag_searches.map((search) => `
+    <details>
+      <summary>
+        <strong>${esc(search.query)}</strong>
+        ${search.rewritten ? `<span class="pill warn">rewritten</span>` : ""}
+        <span class="spacer" style="flex:1"></span>
+        <span class="muted mono">${search.results_count} results · top_k ${esc(search.top_k)} · ${ms(search.latency_ms)}</span>
+      </summary>
+      <div class="step-body">
+        ${search.results.length ? search.results.map((result) => `
+          <div style="margin-top:10px">
+            <div class="mono muted" style="font-size:12px">
+              ${esc(result.source||"document")} · doc ${esc((result.document_id||"").slice(0,20))}
+              · chunk ${esc((result.chunk_id||"").slice(0,8))} · score ${Number(result.score||0).toFixed(4)}
+            </div>
+            <div class="bar" style="margin:4px 0"><i style="width:${Math.min(100,(result.score||0)*100)}%"></i></div>
+            <pre>${esc(result.content||"")}</pre>
+          </div>`).join("")
+        : `<div class="muted">No chunk reached the similarity threshold.</div>`}
+      </div>
+    </details>`).join("");
+
+  const llm = table([
+    { key:"node_name", label:"Node" },
+    { key:"provider",  label:"Provider" },
+    { key:"model",     label:"Model", class:"mono" },
+    { key:"input_tokens",  label:"Input tokens" },
+    { key:"output_tokens", label:"Output tokens" },
+    { key:"latency_ms", label:"Latency", render:(r)=>ms(r.latency_ms) },
+    { key:"status", label:"Status", render:(r)=>statusPill(r.status) },
+  ], data.llm_calls);
+
+  const tools = data.tool_calls.map((call) => `
+    <details>
+      <summary>
+        <strong>${esc(call.tool_name)}</strong>
+        ${statusPill(call.status)}
+        <span class="spacer" style="flex:1"></span>
+        <span class="muted mono">${ms(call.latency_ms)}</span>
+      </summary>
+      <div class="step-body">
+        <div class="muted" style="font-size:12px">ARGUMENTS (redacted)</div>
+        <pre>${esc(JSON.stringify(call.arguments, null, 2))}</pre>
+        <div class="muted" style="font-size:12px;margin-top:10px">RESULT</div>
+        <pre>${esc(call.result||"")}</pre>
+      </div>
+    </details>`).join("");
+
+  return `
+    <p><button class="link" onclick="closeRun()">&larr; back to runs</button></p>
+    ${summary}${conversation}
+    <div class="panel"><h2>Execution timeline</h2>${steps || `<div class="notice">No steps.</div>`}</div>
+    <div class="panel"><h2>RAG searches</h2>${searches || `<div class="notice">No retrieval on this run.</div>`}</div>
+    <div class="panel"><h2>LLM calls</h2>${llm}</div>
+    <div class="panel"><h2>Tool calls</h2>${tools || `<div class="notice">No tools ran.</div>`}</div>`;
+}
+
+async function pageRag() {
+  const data = await api("/rag?hours=" + windowSel.value);
+  return `<div class="panel"><h2>RAG searches</h2>${table([
+    { key:"query", label:"Query", class:"wrap" },
+    { key:"top_k", label:"Top K" },
+    { key:"threshold", label:"Threshold" },
+    { key:"results_count", label:"Results" },
+    { key:"rewritten", label:"Rewritten", render:(r)=>r.rewritten ? "yes" : "no" },
+    { key:"latency_ms", label:"Latency", render:(r)=>ms(r.latency_ms) },
+    { key:"run_id", label:"Run", class:"mono",
+      render:(r)=>`<button class="link mono" onclick="openRun('${esc(r.run_id)}')">${esc(r.run_id.slice(0,14))}…</button>` },
+    { key:"at", label:"When", render:(r)=>when(r.at) },
+  ], data.searches)}</div>`;
+}
+
+async function pageTools() {
+  const data = await api("/tools?hours=" + windowSel.value);
+  return `<div class="panel"><h2>Tool calls</h2>${table([
+    { key:"tool_name", label:"Tool" },
+    { key:"arguments", label:"Arguments", class:"wrap mono",
+      render:(r)=>esc(JSON.stringify(r.arguments)) },
+    { key:"result", label:"Result", class:"wrap mono",
+      render:(r)=>esc((r.result||"").slice(0,200)) },
+    { key:"status", label:"Status", render:(r)=>statusPill(r.status) },
+    { key:"latency_ms", label:"Latency", render:(r)=>ms(r.latency_ms) },
+    { key:"run_id", label:"Run", class:"mono",
+      render:(r)=>`<button class="link mono" onclick="openRun('${esc(r.run_id)}')">${esc(r.run_id.slice(0,14))}…</button>` },
+    { key:"at", label:"When", render:(r)=>when(r.at) },
+  ], data.calls)}</div>`;
+}
+
+async function pageModels() {
+  const data = await api("/models?hours=" + windowSel.value);
+  return `<div class="panel">
+    <h2>Models actually called (from Laravel's text_llm)</h2>
+    ${table([
+      { key:"provider", label:"Provider" },
+      { key:"model", label:"Model", class:"mono" },
+      { key:"calls", label:"Calls" },
+      { key:"input_tokens", label:"Input tokens" },
+      { key:"output_tokens", label:"Output tokens" },
+      { key:"average_latency_ms", label:"Avg latency", render:(r)=>ms(r.average_latency_ms) },
+      { key:"failures", label:"Failures",
+        render:(r)=>r.failures ? `<span class="bad">${r.failures}</span>` : "0" },
+    ], data.models)}</div>`;
+}
+
+async function pageErrors() {
+  const data = await api("/logs?hours=" + windowSel.value);
+  return `<div class="panel"><h2>Errors</h2>${table([
+    { key:"at", label:"Time", render:(r)=>when(r.at) },
+    { key:"run_id", label:"Run ID", class:"mono",
+      render:(r)=>`<button class="link mono" onclick="openRun('${esc(r.run_id)}')">${esc(r.run_id.slice(0,14))}…</button>` },
+    { key:"node", label:"Node" },
+    { key:"provider", label:"Provider" },
+    { key:"model", label:"Model", class:"mono" },
+    { key:"error", label:"Error", class:"wrap" },
+    { key:"latency_ms", label:"Latency", render:(r)=>ms(r.latency_ms) },
+  ], data.errors)}</div>`;
+}
+
+// -- shell ------------------------------------------------------------------
+
+const RENDERERS = {
+  overview: pageOverview, runs: pageRuns, rag: pageRag,
+  tools: pageTools, models: pageModels, errors: pageErrors,
+};
+
+window.openRun  = (runId) => { state.runId = runId; render(); };
+window.closeRun = ()      => { state.runId = null; render(); };
+
+function drawNav() {
+  document.getElementById("nav").innerHTML = PAGES.map(([id, label]) =>
+    `<button class="${state.page === id && !state.runId ? "active" : ""}"
+             onclick="go('${id}')">${label}</button>`).join("");
+}
+window.go = (page) => { state.page = page; state.runId = null; render(); };
+
+async function render() {
+  drawNav();
+  try {
+    view.innerHTML = state.runId
+      ? await pageRunDetail(state.runId)
+      : await (RENDERERS[state.page] || pageOverview)();
+  } catch (error) {
+    view.innerHTML = `<div class="panel"><div class="notice bad">${esc(error.message)}</div></div>`;
+  }
+}
+
+// Polling, not websockets: the service exposes no realtime transport, and
+// adding one for a developer view would be a larger change than the view.
+function setupLive() {
+  if (state.timer) { clearInterval(state.timer); state.timer = null; }
+  if (liveBox.checked) state.timer = setInterval(render, 4000);
+}
+
+render();
+</script>
+</body>
+</html>

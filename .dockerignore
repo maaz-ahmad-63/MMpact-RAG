@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Never bake secrets or local thread/prompt records into an image.
+.env
+.env.*
+!.env.example
+storage/
+
+*.md
+.git
+.gitignore
+Dockerfile
+.dockerignore

@@ -1,0 +1,64 @@
+{
+  "_readme": [
+    "THE registry. Every LLM identifier this service understands is declared here",
+    "and nowhere else - not in .env, not in service code, not in a provider class.",
+    "",
+    "Laravel sends `text_llm`; the resolver in services/models.py looks it up here",
+    "and returns a provider + a real model id. Adding a model your dashboard offers",
+    "is an edit to THIS FILE and a restart - no code change, no redeploy of logic.",
+    "",
+    "  models      identifier -> { provider, model }. `model` is the id the",
+    "              provider's own API expects, verbatim, including any vendor",
+    "              prefix (Groq serves GPT-OSS as 'openai/gpt-oss-120b').",
+    "  providers   how to reach a provider: which .env var holds its key, which",
+    "              identifier to fall back to, and the name prefixes that point at",
+    "              it when an unknown identifier arrives.",
+    "  default     used only when a caller sends no identifier at all (internal",
+    "              classification, OpenClaw's OpenAI-compatible route). Laravel's",
+    "              WhatsApp path always sends one.",
+    "",
+    "Point LLM_REGISTRY_PATH at a copy of this file to override it per deployment",
+    "without rebuilding the image. That variable is a PATH, not a model name.",
+    "",
+    "API keys never appear here. They stay in .env and are read by name via",
+    "providers.<name>.key_env."
+  ],
+
+  "default": "gemini_flash",
+
+  "providers": {
+    "groq": {
+      "key_env": "GROQ_API_KEY",
+      "fallback": "groq_llama_3_3_70b",
+      "prefixes": ["groq", "llama", "mixtral", "compound"]
+    },
+    "openai": {
+      "key_env": "OPENAI_API_KEY",
+      "fallback": "openai_gpt_4o_mini",
+      "prefixes": ["openai", "gpt", "o1", "o3"]
+    },
+    "gemini": {
+      "key_env": "GEMINI_API_KEY",
+      "fallback": "gemini_flash",
+      "prefixes": ["gemini", "google"]
+    },
+    "anthropic": {
+      "key_env": "ANTHROPIC_API_KEY",
+      "fallback": "anthropic_claude_sonnet_5",
+      "prefixes": ["anthropic", "claude"]
+    }
+  },
+
+  "models": {
+    "groq_gpt_oss_120b": { "provider": "groq", "model": "openai/gpt-oss-120b" },
+    "groq_gpt_oss_20b": { "provider": "groq", "model": "openai/gpt-oss-20b" },
+    "groq_llama_3_3_70b": { "provider": "groq", "model": "llama-3.3-70b-versatile" },
+    "groq_llama_3_1_8b": { "provider": "groq", "model": "llama-3.1-8b-instant" },
+    "groq_compound": { "provider": "groq", "model": "groq/compound" },
+    "groq_compound_mini": { "provider": "groq", "model": "groq/compound-mini" },
+    "groq_kimi_k2": { "provider": "groq", "model": "groq/compound" },
+    "llama_3_3": { "provider": "groq", "model": "llama-3.3-70b-versatile" },
+    "llama_3_1_8b": { "provider": "groq", "model": "llama-3.1-8b-instant" },
+    "groq_llama_3_3": { "provider": "groq", "model": "llama-3.3-70b-versatile" }
+  }
+}
