@@ -4,49 +4,15 @@ httpx==0.28.1
 pydantic
 pydantic-settings
 
-# -- LLM providers ----------------------------------------------------------
-# Providers are imported lazily: only the one a resolved `text_llm` names is
-# loaded, so an unused SDK costs nothing at runtime. All four are installed so
-# the LLM registry (app/services/llm_registry.json) is free to point any
-# identifier at any provider without a rebuild.
-groq==0.15.0
+# -- RAG document processing and database --
+python-multipart==0.0.20
+asyncpg==0.30.0
+pypdf==5.1.0
+python-docx==1.1.2
 
-# OpenAI
-openai>=1.60.0
+# -- Testing --
+pytest
+pytest-asyncio
 
-# Google Gemini. This is the SDK Google currently recommends; the older
-# `google-generativeai` package is NOT used.
-google-genai>=1.61.0
-
-# Anthropic
-anthropic
-
-# -- RAG layer (app/rag/) ---------------------------------------------------
-# Only this layer uses these. The agent, the providers and the JSON stores are
-# unchanged by their presence.
-python-multipart==0.0.20   # multipart/form-data, for the upload route
-asyncpg==0.30.0            # Postgres driver for rag_documents / rag_chunks
-pypdf==5.1.0               # PDF text extraction
-python-docx==1.1.2         # DOCX paragraphs and tables
-
-# The embedding model itself is NOT installed here. The default path is
-# EMBEDDING_API_BASE pointing at a self-hosted BGE-M3 server (text-embeddings-
-# inference, Infinity, vLLM, Ollama), which needs nothing but httpx - already a
-# dependency above - and keeps a ~2 GB model out of this image.
-#
-# To run BGE-M3 inside this process instead (EMBEDDING_BACKEND=local):
-#   pip install sentence-transformers
-
-# -- LangChain agent (app/graph/) -------------------------------------------
-# langchain-core ONLY: @tool, the message types and BaseChatModel/bind_tools.
-#
-# Deliberately NOT `langchain` and NOT langchain-<provider>. Measured:
-#     pip install --dry-run langchain langchain-groq
-#     -> Would install groq-0.37.1 langchain-1.3.15 langchain-core-1.5.6
-#                      langchain-groq-1.1.3 langgraph-1.2.11
-# `langchain` drags in langgraph, and langchain-groq would replace the pinned
-# groq 0.15.0 that /agent/reply runs on. app/graph/chat_model.py therefore
-# adapts the EXISTING services/llm providers to LangChain's interface instead,
-# which also keeps their bounded timeouts, reasoning/thinking controls and
-# require_model() guard.
-langchain-core>=1.4.0
+# -- MongoDB Logging --
+motor>=3.3.0

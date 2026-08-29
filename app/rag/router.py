@@ -36,7 +36,10 @@ from fastapi import (
     status,
 )
 
+import datetime
+import uuid
 from ..security import require_token
+from ..services.mongodb_logger import mongodb_logger
 from . import document_loader, embeddings, service, vector_store
 from .config import rag_settings
 from .schemas import (
@@ -56,6 +59,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/api/rag",
     tags=["rag"],
+    dependencies=[Depends(require_token)],
+)
+
+logs_router = APIRouter(
+    prefix="/api",
+    tags=["logs"],
     dependencies=[Depends(require_token)],
 )
 
@@ -81,7 +90,7 @@ def _handled():
 
 
 @router.post(
-    "/documents/upload",
+    "/upload",
     response_model=UploadResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Upload and ingest a PDF, DOCX or TXT document",
@@ -169,10 +178,59 @@ async def search(request: SearchRequest = Body()) -> SearchResponse:
     called in either case: what to do about an empty result is the calling
     agent's decision, not this endpoint's.
     """
+    import time
+    import asyncio
+
+    request_id = f"req_{uuid.uuid4().hex}"
+    start_time = time.perf_counter()
+    error_msg = None
+    outcome = None
+
     _check_top_k(request.top_k)
-    with _handled():
-        outcome = await service.search(**request.model_dump())
-    return SearchResponse(**outcome)
+
+    try:
+        with _handled():
+            outcome = await service.search(**request.model_dump())
+        return SearchResponse(**outcome)
+    except Exception as e:
+        error_msg = str(e)
+        raise
+    finally:
+        took_ms = int((time.perf_counter() - start_time) * 1000)
+        doc_ids = []
+        chunk_ids = []
+        scores = []
+        found = False
+        num_chunks = 0
+
+        if outcome:
+            found = outcome.get("found", False)
+            results = outcome.get("results", [])
+            num_chunks = len(results)
+            for r in results:
+                chunk_ids.append(r.get("chunk_id"))
+                doc_ids.append(r.get("document_id"))
+                scores.append(r.get("similarity"))
+            # Deduplicate document IDs
+            doc_ids = list(set(doc_ids))
+
+        log_data = {
+            "query": request.query,
+            "timestamp": datetime.datetime.now(datetime.timezone.utc),
+            "request_id": request_id,
+            "document_ids": doc_ids,
+            "chunks_retrieved_count": num_chunks,
+            "chunk_ids": chunk_ids,
+            "similarity_scores": scores,
+            "threshold": request.threshold if request.threshold is not None else rag_settings.rag_similarity_threshold,
+            "top_k": request.top_k if request.top_k is not None else rag_settings.rag_top_k,
+            "found": found,
+            "took_ms": took_ms,
+            "model_name": rag_settings.embedding_model,
+            "error": error_msg,
+        }
+        # Safely queue the database log write without blocking
+        asyncio.create_task(mongodb_logger.log_search(log_data))
 
 
 @router.post(
@@ -334,3 +392,21 @@ def _parse_metadata(raw: str | None) -> dict[str, Any]:
             "metadata must be a JSON object",
         )
     return parsed
+
+
+@logs_router.get(
+    "/logs/searches",
+    summary="Retrieve recent search logs",
+)
+async def get_search_logs(
+    limit: int = Query(default=50, ge=1, le=200),
+    document_id: str | None = Query(default=None),
+    found: bool | None = Query(default=None),
+) -> list[dict[str, Any]]:
+    """Retrieve recent queries and metrics from the MongoDB logs collection."""
+    return await mongodb_logger.get_search_logs(
+        limit=limit,
+        document_id=document_id,
+        found=found,
+    )
+

@@ -706,7 +706,7 @@ def client(monkeypatch):
     from app.config import settings as app_settings
     from app.rag import router as rag_router
 
-    monkeypatch.setattr(app_settings, "agent_api_token", "")
+    monkeypatch.setattr(app_settings, "rag_api_token", "")
     from fastapi import FastAPI
 
     application = FastAPI()
@@ -716,7 +716,7 @@ def client(monkeypatch):
 
 async def test_upload_rejects_an_unsupported_type(client):
     response = client.post(
-        "/api/rag/documents/upload",
+        "/api/rag/upload",
         files={"file": ("archive.zip", b"PK\x03\x04", "application/zip")},
     )
     assert response.status_code == 400
@@ -725,7 +725,7 @@ async def test_upload_rejects_an_unsupported_type(client):
 
 async def test_upload_rejects_an_empty_file(client):
     response = client.post(
-        "/api/rag/documents/upload",
+        "/api/rag/upload",
         files={"file": ("empty.txt", b"", "text/plain")},
     )
     assert response.status_code == 422
@@ -736,7 +736,7 @@ async def test_upload_rejects_a_file_over_the_size_limit(client, monkeypatch):
 
     monkeypatch.setattr(rag_router.rag_settings, "rag_max_upload_mb", 0)
     response = client.post(
-        "/api/rag/documents/upload",
+        "/api/rag/upload",
         files={"file": ("big.txt", b"x" * 10, "text/plain")},
     )
     assert response.status_code == 413
@@ -744,7 +744,7 @@ async def test_upload_rejects_a_file_over_the_size_limit(client, monkeypatch):
 
 async def test_upload_rejects_malformed_metadata(client, monkeypatch):
     response = client.post(
-        "/api/rag/documents/upload",
+        "/api/rag/upload",
         files={"file": ("policy.txt", b"Refund policy text.", "text/plain")},
         data={"metadata": "not json"},
     )
@@ -765,11 +765,50 @@ async def test_upload_returns_the_ingest_summary(client, monkeypatch):
 
     monkeypatch.setattr(rag_router.service, "ingest", _ingest)
     response = client.post(
-        "/api/rag/documents/upload",
+        "/api/rag/upload",
         files={"file": ("policy.txt", b"Refund policy text.", "text/plain")},
     )
     assert response.status_code == 201
     assert response.json()["chunks"] == 3
+
+
+async def test_authentication_enforced(monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.config import settings as app_settings
+    from app.rag import router as rag_router
+    from fastapi import FastAPI
+
+    monkeypatch.setattr(app_settings, "rag_api_token", "secure-token")
+    application = FastAPI()
+    application.include_router(rag_router.router)
+    auth_client = TestClient(application)
+
+    # Missing authorization header
+    response = auth_client.post("/api/rag/search", json={"query": "test"})
+    assert response.status_code == 401
+
+    # Invalid authorization header
+    response = auth_client.post(
+        "/api/rag/search",
+        json={"query": "test"},
+        headers={"Authorization": "Bearer bad-token"}
+    )
+    assert response.status_code == 401
+
+    # Correct authorization header
+    # Mock vector search to avoid actual DB access
+    async def mock_search(**kwargs):
+        return {
+            "query": "test", "found": False, "results": [],
+            "threshold": 0.7, "top_k": 5, "took_ms": 1,
+        }
+    monkeypatch.setattr(rag_router.service, "search", mock_search)
+    response = auth_client.post(
+        "/api/rag/search",
+        json={"query": "test"},
+        headers={"Authorization": "Bearer secure-token"}
+    )
+    assert response.status_code == 200
 
 
 async def test_search_rejects_an_empty_query(client):

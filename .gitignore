@@ -4,8 +4,9 @@ __pycache__/
 venv/
 .env
 *.egg-info/
-.vscode/
-frontend/
+frontend/node_modules/
+frontend/dist/
+frontend/.env
 *.log
 .DS_Store
 
