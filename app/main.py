@@ -1,10 +1,12 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from pathlib import Path
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .rag import router as rag_router
@@ -12,6 +14,10 @@ from .rag import service as rag_service
 from .services.mongodb_logger import mongodb_logger
 from .whatsapp import conversation as whatsapp_conversation
 from .whatsapp import router as whatsapp_router
+
+FRONTEND_DIST_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+FRONTEND_INDEX_FILE = FRONTEND_DIST_DIR / "index.html"
+FRONTEND_ASSETS_DIR = FRONTEND_DIST_DIR / "assets"
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 
@@ -109,15 +115,45 @@ async def _log_validation_error(request: Request, error: RequestValidationError)
     return JSONResponse(status_code=422, content={"detail": jsonable_encoder(error.errors())})
 
 
-@app.get("/", tags=["health"])
+# Mount static assets if built frontend exists
+if FRONTEND_ASSETS_DIR.is_dir():
+    app.mount("/assets", StaticFiles(directory=str(FRONTEND_ASSETS_DIR)), name="assets")
+
+
+@app.get("/favicon.svg", include_in_schema=False)
+async def favicon_svg():
+    fav = FRONTEND_DIST_DIR / "favicon.svg"
+    if fav.is_file():
+        return FileResponse(fav)
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
+@app.get("/icons.svg", include_in_schema=False)
+async def icons_svg():
+    icons = FRONTEND_DIST_DIR / "icons.svg"
+    if icons.is_file():
+        return FileResponse(icons)
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
 @app.get("/health", tags=["health"])
-async def root_health() -> dict:
+async def service_health() -> dict:
     """Unauthenticated service health check."""
     return {
         "status": "healthy",
         "service": "MMpact RAG Service"
     }
 
+
+@app.get("/", tags=["frontend"])
+async def root_endpoint():
+    """Serves frontend index.html when built, or fallback status JSON."""
+    if FRONTEND_INDEX_FILE.is_file():
+        return FileResponse(FRONTEND_INDEX_FILE)
+    return {
+        "status": "healthy",
+        "service": "MMpact RAG Service"
+    }
 
 
 if rag_router is not None:
@@ -126,6 +162,33 @@ if rag_router is not None:
 
 if whatsapp_router is not None:
     app.include_router(whatsapp_router.router)
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def frontend_spa_fallback(full_path: str):
+    """Fallback for SPA client-side routes, guarding API endpoints."""
+    # Never return HTML for API paths or documentation endpoints
+    if (
+        full_path == "api"
+        or full_path.startswith("api/")
+        or full_path == "docs"
+        or full_path.startswith("docs/")
+        or full_path == "redoc"
+        or full_path.startswith("redoc/")
+        or full_path == "openapi.json"
+    ):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    # If it is a static file that exists in frontend/dist, serve it
+    static_candidate = FRONTEND_DIST_DIR / full_path
+    if static_candidate.is_file():
+        return FileResponse(static_candidate)
+
+    # Return index.html for SPA client-side routes if the build exists
+    if FRONTEND_INDEX_FILE.is_file():
+        return FileResponse(FRONTEND_INDEX_FILE)
+
+    raise HTTPException(status_code=404, detail="Not Found")
 
 
 if __name__ == "__main__":
