@@ -10,7 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Service configuration for Universal RAG."""
+    """Service configuration for MMpact RAG."""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

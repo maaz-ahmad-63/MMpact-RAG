@@ -40,9 +40,11 @@ import datetime
 import uuid
 from ..security import require_token
 from ..services.mongodb_logger import mongodb_logger
-from . import document_loader, embeddings, service, vector_store
+from . import document_loader, embeddings, llm, service, vector_store
 from .config import rag_settings
 from .schemas import (
+    AskRequest,
+    AskResponse,
     ContextRequest,
     ContextResponse,
     DeleteResponse,
@@ -78,11 +80,18 @@ def _handled():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(error)) from error
     except (document_loader.ExtractionError, service.EmptyDocument) as error:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(error)) from error
-    except (document_loader.ParserUnavailable, vector_store.VectorStoreUnavailable) as error:
+    except (
+        document_loader.ParserUnavailable,
+        vector_store.VectorStoreUnavailable,
+        llm.LLMConfigurationError,
+    ) as error:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from error
-    except embeddings.EmbeddingError as error:
-        # 502: this service is fine, the thing it depends on is not.
-        logger.error("rag: embedding failure - %s", error)
+    except embeddings.CloudflareQuotaExhaustedError as error:
+        logger.warning("rag: Cloudflare quota exhausted - %s", error)
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(error)) from error
+    except (embeddings.EmbeddingError, llm.LLMProviderError) as error:
+        # 502: this service is fine, the upstream backend it depends on is not.
+        logger.error("rag: upstream backend failure - %s", error)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(error)) from error
     except vector_store.VectorStoreError as error:
         logger.error("rag: database failure - %s", error)
@@ -256,6 +265,77 @@ async def context(request: ContextRequest = Body()) -> ContextResponse:
     with _handled():
         outcome = await service.build_context(max_chars=max_chars, **payload)
     return ContextResponse(**outcome)
+
+
+@router.post(
+    "/ask",
+    response_model=AskResponse,
+    summary="Generate a grounded answer and source citations from the knowledge base",
+    responses={
+        422: {"description": "Empty query or validation error"},
+        502: {"description": "The LLM provider or embedding backend failed"},
+        503: {"description": "LLM or RAG storage is not configured"},
+    },
+)
+async def ask(request: AskRequest = Body()) -> AskResponse:
+    """End-to-end RAG answer endpoint.
+
+    1. Retrieves relevant chunks via pgvector + FTS + RRF + Cross-Encoder.
+    2. Builds structured context with [SOURCE X] labels.
+    3. Prompts the configured LLM provider with grounding & anti-injection safeguards.
+    4. Returns grounded answer, citations, retrieval summary, and latency metrics.
+    """
+    import asyncio
+    import datetime
+    import time
+
+    request_id = f"req_{uuid.uuid4().hex}"
+    start_time = time.perf_counter()
+    error_msg = None
+    outcome = None
+
+    if request.top_k is not None:
+        _check_top_k(request.top_k)
+
+    try:
+        with _handled():
+            outcome = await service.ask(**request.model_dump())
+        return AskResponse(**outcome)
+    except Exception as e:
+        error_msg = str(e)
+        raise
+    finally:
+        total_ms = int((time.perf_counter() - start_time) * 1000)
+        retrieval_data = outcome.get("retrieval", {}) if outcome else {}
+        latency_data = outcome.get("latency", {}) if outcome else {}
+
+        log_data = {
+            "query": request.query,
+            "tenant_id": request.tenant_id,
+            "user_id": request.user_id,
+            "agent_id": request.agent_id,
+            "conversation_id": request.conversation_id,
+            "timestamp": datetime.datetime.now(datetime.timezone.utc),
+            "request_id": request_id,
+            "answer": outcome.get("answer") if outcome else None,
+            "sources": outcome.get("sources") if outcome else [],
+            "chunks_retrieved_count": retrieval_data.get("chunks_found", 0),
+            "chunks_used_count": retrieval_data.get("chunks_used", 0),
+            "retrieval_ms": latency_data.get("retrieval_ms", 0),
+            "rerank_ms": latency_data.get("rerank_ms", 0),
+            "llm_ms": latency_data.get("llm_ms", 0),
+            "total_ms": total_ms,
+            "top_k": request.top_k or rag_settings.rag_top_k,
+            "embedding_model": rag_settings.embedding_model,
+            "reranker_model": rag_settings.rag_rerank_model,
+            "llm_provider": outcome.get("provider") if outcome else None,
+            "llm_model": outcome.get("model") if outcome else None,
+            "token_usage": outcome.get("usage") if outcome else None,
+            "error": error_msg,
+            "found": bool(outcome.get("sources")) if outcome else False,
+        }
+        # Safe async log dispatch
+        asyncio.create_task(mongodb_logger.log_ask(log_data))
 
 
 @router.get(

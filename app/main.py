@@ -10,6 +10,8 @@ from .config import settings
 from .rag import router as rag_router
 from .rag import service as rag_service
 from .services.mongodb_logger import mongodb_logger
+from .whatsapp import conversation as whatsapp_conversation
+from .whatsapp import router as whatsapp_router
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 
@@ -64,6 +66,7 @@ async def lifespan(app: FastAPI):
     if rag_service is not None:
         await rag_service.startup()
     await mongodb_logger.startup()
+    await whatsapp_conversation.init_whatsapp_tables()
 
     yield
     await mongodb_logger.shutdown()
@@ -72,10 +75,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Universal RAG API",
+    title="MMpact RAG API",
     version="2.0.0",
     description=(
-        "Standalone document ingestion and semantic retrieval service powered by PostgreSQL + pgvector."
+        "Standalone document intelligence, hybrid retrieval (pgvector + FTS + RRF) and answer generation."
     ),
     lifespan=lifespan,
 )
@@ -107,17 +110,22 @@ async def _log_validation_error(request: Request, error: RequestValidationError)
 
 
 @app.get("/", tags=["health"])
+@app.get("/health", tags=["health"])
 async def root_health() -> dict:
     """Unauthenticated service health check."""
     return {
         "status": "healthy",
-        "service": "Universal RAG Service"
+        "service": "MMpact RAG Service"
     }
+
 
 
 if rag_router is not None:
     app.include_router(rag_router.router)
     app.include_router(rag_router.logs_router)
+
+if whatsapp_router is not None:
+    app.include_router(whatsapp_router.router)
 
 
 if __name__ == "__main__":

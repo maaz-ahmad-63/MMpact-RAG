@@ -49,6 +49,7 @@ def config() -> RagSettings:
         embedding_backend="local",
         rag_embedding_dim=8,
         embedding_batch_size=2,
+        rag_rerank_enabled=False,
     )
 
 
@@ -521,12 +522,19 @@ def retrieval(monkeypatch, embedder, config):
 
     state: dict = {"hits": [], "top_k": None}
 
-    async def _search(vector, *, top_k, settings=None, **_kwargs):
-        state["top_k"] = top_k
+    async def _hybrid_search(vector, query, settings=None, **_kwargs):
+        limit = _kwargs.get("limit")
+        vector_candidate_count = _kwargs.get("vector_candidate_count", 20)
+        state["top_k"] = limit if limit is not None else (settings or config).rag_top_k
         state["vector"] = vector
-        return state["hits"][:top_k]
+        for hit in state["hits"]:
+            if getattr(hit, "vector_score", None) is None:
+                hit.vector_score = hit.similarity
+            if getattr(hit, "keyword_score", None) is None:
+                hit.keyword_score = 0.0
+        return state["hits"][:vector_candidate_count], []
 
-    monkeypatch.setattr(service.vector_store, "search", _search)
+    monkeypatch.setattr(service.vector_store, "hybrid_search", _hybrid_search)
     return state
 
 

@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class MongoDBLogger:
-    """Asynchronous logger for Universal RAG searches using MongoDB + motor."""
+    """Asynchronous logger for MMpact RAG searches using MongoDB + motor."""
 
     def __init__(self) -> None:
         self._client: Optional[AsyncIOMotorClient] = None
@@ -79,6 +79,20 @@ class MongoDBLogger:
             await self._collection.insert_one(log_data)
         except Exception as error:
             logger.error("rag: failed to write search log to MongoDB (%s)", error)
+
+    async def log_ask(self, log_data: Dict[str, Any]) -> None:
+        """Write /ask request metrics, latencies, tokens and answers to MongoDB. Safe-guarded to never raise."""
+        if not self.is_configured or self._collection is None:
+            return
+
+        try:
+            # Clean copy without secrets
+            sanitized = {k: v for k, v in log_data.items() if not any(s in k.lower() for s in ("key", "token", "password", "secret", "auth"))}
+            if "timestamp" not in sanitized:
+                sanitized["timestamp"] = datetime.datetime.now(datetime.timezone.utc)
+            await self._collection.insert_one(sanitized)
+        except Exception as error:
+            logger.error("rag: failed to write ask log to MongoDB (%s)", error)
 
     async def get_search_logs(
         self,

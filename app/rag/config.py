@@ -42,6 +42,18 @@ class RagSettings(BaseSettings):
     # Schema the two tables live in. Separate from anything the gateway owns.
     rag_db_schema: str = "public"
 
+    # -- provider selection -------------------------------------------------
+    # local | cloudflare
+    embedding_provider: Literal["local", "cloudflare"] = "local"
+    reranker_provider: Literal["local", "cloudflare"] = "local"
+
+    # -- cloudflare workers ai ----------------------------------------------
+    cloudflare_account_id: str = ""
+    cloudflare_api_token: str = ""
+    cloudflare_embedding_model: str = "@cf/baai/bge-m3"
+    cloudflare_reranker_model: str = "@cf/baai/bge-reranker-base"
+    cloudflare_timeout_s: float = 30.0
+
     # -- embeddings ---------------------------------------------------------
     embedding_model: str = "BAAI/bge-m3"
     # auto  - HTTP when EMBEDDING_API_BASE is set, otherwise local
@@ -95,11 +107,49 @@ class RagSettings(BaseSettings):
     # can never blow the model's context window on its own.
     rag_context_max_chars: int = 6000
 
+    # -- hybrid search settings ---------------------------------------------
+    rag_vector_candidates: int = 20
+    rag_keyword_candidates: int = 20
+    rag_rrf_k: int = 60
+
+    # -- reranker settings --------------------------------------------------
+    rag_rerank_enabled: bool = True
+    rag_rerank_candidates: int = 20
+    rag_rerank_top_k: int = 5
+    rag_rerank_model: str = "BAAI/bge-reranker-base"
+
+    # -- llm answer pipeline (/api/rag/ask) ---------------------------------
+    # auto (picks first available with key) | groq | gemini | openai | anthropic | ollama | mock
+    rag_llm_provider: str = "auto"
+    rag_llm_model: str = ""
+    rag_llm_temperature: float = 0.2
+    rag_llm_max_tokens: int = 1024
+    rag_max_history_turns: int = 10
+    rag_default_system_prompt: str = ""
+
+    # LLM API keys (read from .env)
+    groq_api_key: str = ""
+    gemini_api_key: str = ""
+    google_api_key: str = ""
+    openai_api_key: str = ""
+    anthropic_api_key: str = ""
+    ollama_base_url: str = "http://localhost:11434"
+
     # -- uploads ------------------------------------------------------------
     rag_max_upload_mb: int = 25
     # Where the original file is kept, so a document can be re-chunked later
     # without asking the client to upload it again. Blank = do not keep it.
     rag_storage_dir: str = "./storage/rag_documents"
+
+    @field_validator("embedding_provider", "reranker_provider", mode="before")
+    @classmethod
+    def _normalize_provider(cls, value: str) -> str:
+        if isinstance(value, str):
+            val = value.strip().lower()
+            if val in ("local", "cloudflare"):
+                return val
+            raise ValueError(f"Invalid provider '{value}'. Must be 'local' or 'cloudflare'.")
+        return value
 
     @field_validator("rag_chunk_overlap")
     @classmethod
@@ -113,6 +163,20 @@ class RagSettings(BaseSettings):
                 f"({size}); an overlap at or above the size never advances."
             )
         return value
+
+    def validate_cloudflare_config(self, for_feature: str = "inference") -> None:
+        """Validate that Cloudflare credentials are configured when needed."""
+        missing = []
+        if not self.cloudflare_account_id.strip():
+            missing.append("CLOUDFLARE_ACCOUNT_ID")
+        if not self.cloudflare_api_token.strip():
+            missing.append("CLOUDFLARE_API_TOKEN")
+        if missing:
+            raise ValueError(
+                f"Cloudflare {for_feature} requested, but required environment "
+                f"variable(s) missing: {', '.join(missing)}. "
+                f"Please set them in your environment or .env file."
+            )
 
     @property
     def dsn(self) -> str:
@@ -132,7 +196,9 @@ class RagSettings(BaseSettings):
         return f"{base}/embeddings" if base else ""
 
     @property
-    def resolved_backend(self) -> Literal["http", "local"]:
+    def resolved_backend(self) -> Literal["http", "local", "cloudflare"]:
+        if self.embedding_provider == "cloudflare":
+            return "cloudflare"
         if self.embedding_backend != "auto":
             return self.embedding_backend
         return "http" if self.embedding_endpoint else "local"
@@ -147,9 +213,26 @@ class RagSettings(BaseSettings):
 
     def public_state(self) -> dict[str, object]:
         """What /api/rag/health may report. Names and numbers, never secrets."""
+        active_embedding_model = (
+            self.cloudflare_embedding_model
+            if self.embedding_provider == "cloudflare"
+            else self.embedding_model
+        )
+        active_reranker_model = (
+            self.cloudflare_reranker_model
+            if self.reranker_provider == "cloudflare"
+            else self.rag_rerank_model
+        )
         return {
             "database_configured": self.database_configured,
-            "embedding_model": self.embedding_model,
+            "embedding_provider": self.embedding_provider,
+            "reranker_provider": self.reranker_provider,
+            "cloudflare_configured": bool(
+                self.cloudflare_account_id.strip() and self.cloudflare_api_token.strip()
+            ),
+            "cloudflare_embedding_model": self.cloudflare_embedding_model,
+            "cloudflare_reranker_model": self.cloudflare_reranker_model,
+            "embedding_model": active_embedding_model,
             "embedding_backend": self.resolved_backend,
             "embedding_endpoint": self.embedding_endpoint or None,
             "embedding_api_format": self.embedding_api_format,
@@ -162,6 +245,21 @@ class RagSettings(BaseSettings):
             "top_k": self.rag_top_k,
             "similarity_threshold": self.rag_similarity_threshold,
             "distance_metric": self.rag_distance_metric,
+            "vector_candidates": self.rag_vector_candidates,
+            "keyword_candidates": self.rag_keyword_candidates,
+            "rrf_k": self.rag_rrf_k,
+            "rerank_enabled": self.rag_rerank_enabled,
+            "rerank_candidates": self.rag_rerank_candidates,
+            "rerank_top_k": self.rag_rerank_top_k,
+            "rerank_model": active_reranker_model,
+            "llm_provider": self.rag_llm_provider,
+            "llm_model": self.rag_llm_model,
+            "llm_temperature": self.rag_llm_temperature,
+            "llm_max_tokens": self.rag_llm_max_tokens,
+            "groq_configured": bool(self.groq_api_key),
+            "gemini_configured": bool(self.gemini_api_key or self.google_api_key),
+            "openai_configured": bool(self.openai_api_key),
+            "anthropic_configured": bool(self.anthropic_api_key),
         }
 
 

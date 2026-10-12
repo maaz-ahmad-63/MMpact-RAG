@@ -62,6 +62,10 @@ class SearchHit:
     metadata: dict[str, Any]
     filename: str
     file_type: str
+    vector_score: float | None = None
+    keyword_score: float | None = None
+    rrf_score: float | None = None
+    rerank_score: float | None = None
 
 
 _pool = None  # asyncpg.Pool
@@ -86,7 +90,13 @@ async def get_pool(settings: RagSettings | None = None):
     global _pool
     config = settings or rag_settings
     if _pool is not None:
-        return _pool
+        try:
+            if hasattr(_pool, "_loop") and _pool._loop.is_closed():
+                _pool = None
+            else:
+                return _pool
+        except Exception:
+            _pool = None
 
     if not config.database_configured:
         raise VectorStoreUnavailable(
@@ -342,6 +352,7 @@ async def search(
     embedding: Sequence[float],
     *,
     top_k: int,
+    tenant_id: str | None = None,
     user_id: str | None = None,
     agent_id: str | None = None,
     conversation_id: str | None = None,
@@ -355,6 +366,9 @@ async def search(
 
     parameters: list[Any] = [to_vector_literal(embedding)]
     filters: list[str] = []
+    if tenant_id:
+        parameters.append(tenant_id)
+        filters.append(f"(d.user_id = ${len(parameters)} OR d.metadata->>'tenant_id' = ${len(parameters)})")
     # Optional scoping. Each filter is a bound parameter; none is interpolated.
     for column, value in (
         ("user_id", user_id),
@@ -411,6 +425,137 @@ async def search(
     ]
 
 
+async def hybrid_search(
+    embedding: Sequence[float],
+    query_text: str,
+    *,
+    vector_candidate_count: int,
+    keyword_candidate_count: int,
+    tenant_id: str | None = None,
+    user_id: str | None = None,
+    agent_id: str | None = None,
+    conversation_id: str | None = None,
+    document_ids: Sequence[str] | None = None,
+    settings: RagSettings | None = None,
+    **kwargs: Any,
+) -> tuple[list[SearchHit], list[SearchHit]]:
+    """Retrieve candidates from both vector search and keyword search.
+
+    Returns a tuple: (vector_hits, keyword_hits)
+    """
+    config = settings or rag_settings
+    pool = await get_pool(config)
+    schema = _schema(config)
+
+    # Base parameters: $1 is the embedding, $2 is the query text
+    base_parameters: list[Any] = [to_vector_literal(embedding), query_text]
+    filters: list[str] = []
+
+    if tenant_id:
+        base_parameters.append(tenant_id)
+        filters.append(f"(d.user_id = ${len(base_parameters)} OR d.metadata->>'tenant_id' = ${len(base_parameters)})")
+
+    for column, value in (
+        ("user_id", user_id),
+        ("agent_id", agent_id),
+        ("conversation_id", conversation_id),
+    ):
+        if value:
+            base_parameters.append(value)
+            filters.append(f"d.{column} = ${len(base_parameters)}")
+
+    if document_ids:
+        base_parameters.append(list(document_ids))
+        filters.append(f"d.id = ANY(${len(base_parameters)}::text[])")
+
+    # Distinct parameters for each candidate query limit
+    vector_parameters = list(base_parameters)
+    vector_parameters.append(int(vector_candidate_count))
+    vector_limit_param = f"${len(vector_parameters)}"
+
+    keyword_parameters = list(base_parameters)
+    keyword_parameters.append(int(keyword_candidate_count))
+    keyword_limit_param = f"${len(keyword_parameters)}"
+
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+
+    query_vector = f"""
+        WITH q AS (
+            SELECT coalesce(nullif(string_agg(lexeme, ' | '), ''), '') AS val
+            FROM unnest(to_tsvector('english', $2::text))
+        )
+        SELECT c.id, c.document_id, c.chunk_index, c.content, c.metadata,
+               d.filename, d.file_type,
+               ({_distance_expression(config)}) AS distance,
+               ({_similarity_expression(config)}) AS similarity,
+               CASE 
+                   WHEN q.val = '' THEN 0.0
+                   ELSE ts_rank_cd(to_tsvector('english', c.content), to_tsquery('english', q.val))
+               END AS keyword_score
+        FROM {schema}.rag_chunks c
+        JOIN {schema}.rag_documents d ON d.id = c.document_id
+        CROSS JOIN q
+        {where_clause}
+        ORDER BY {_distance_expression(config)}
+        LIMIT {vector_limit_param}
+    """
+
+    # Keyword search has the FTS filter in its WHERE clause
+    keyword_filters = list(filters) + ["q.val <> ''", "to_tsvector('english', c.content) @@ to_tsquery('english', q.val)"]
+    keyword_where_clause = f"WHERE {' AND '.join(keyword_filters)}"
+
+    query_keyword = f"""
+        WITH q AS (
+            SELECT coalesce(nullif(string_agg(lexeme, ' | '), ''), '') AS val
+            FROM unnest(to_tsvector('english', $2::text))
+        )
+        SELECT c.id, c.document_id, c.chunk_index, c.content, c.metadata,
+               d.filename, d.file_type,
+               ({_distance_expression(config)}) AS distance,
+               ({_similarity_expression(config)}) AS similarity,
+               CASE 
+                   WHEN q.val = '' THEN 0.0
+                   ELSE ts_rank_cd(to_tsvector('english', c.content), to_tsquery('english', q.val))
+               END AS keyword_score
+        FROM {schema}.rag_chunks c
+        JOIN {schema}.rag_documents d ON d.id = c.document_id
+        CROSS JOIN q
+        {keyword_where_clause}
+        ORDER BY keyword_score DESC
+        LIMIT {keyword_limit_param}
+    """
+
+    try:
+        vector_rows = await pool.fetch(query_vector, *vector_parameters)
+    except Exception as error:  # noqa: BLE001
+        raise VectorStoreError(f"Vector search candidates fetch failed: {error}") from error
+
+    try:
+        keyword_rows = await pool.fetch(query_keyword, *keyword_parameters)
+    except Exception as error:  # noqa: BLE001
+        raise VectorStoreError(f"Keyword search candidates fetch failed: {error}") from error
+
+    def _parse_row(row) -> SearchHit:
+        return SearchHit(
+            chunk_id=str(row["id"]),
+            document_id=row["document_id"],
+            content=row["content"],
+            similarity=float(row["similarity"]),
+            distance=float(row["distance"]),
+            chunk_index=int(row["chunk_index"]),
+            metadata=_as_dict(row["metadata"]),
+            filename=row["filename"],
+            file_type=row["file_type"],
+            vector_score=float(row["similarity"]),
+            keyword_score=float(row["keyword_score"] or 0.0),
+        )
+
+    vector_hits = [_parse_row(r) for r in vector_rows]
+    keyword_hits = [_parse_row(r) for r in keyword_rows]
+
+    return vector_hits, keyword_hits
+
+
 async def get_document(
     document_id: str, *, settings: RagSettings | None = None
 ) -> dict[str, Any] | None:
@@ -426,6 +571,7 @@ async def list_documents(
     *,
     limit: int,
     offset: int,
+    tenant_id: str | None = None,
     user_id: str | None = None,
     agent_id: str | None = None,
     conversation_id: str | None = None,
@@ -438,6 +584,9 @@ async def list_documents(
 
     parameters: list[Any] = []
     filters: list[str] = []
+    if tenant_id:
+        parameters.append(tenant_id)
+        filters.append(f"(user_id = ${len(parameters)} OR metadata->>'tenant_id' = ${len(parameters)})")
     for column, value in (
         ("user_id", user_id),
         ("agent_id", agent_id),

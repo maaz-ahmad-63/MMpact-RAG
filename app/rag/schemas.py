@@ -8,7 +8,7 @@ these routes without a word of hand-written prose.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -92,6 +92,10 @@ class SearchResult(BaseModel):
     document_id: str
     content: str
     similarity: float = Field(description="Higher is closer. Cosine: [0, 1].")
+    vector_score: float | None = None
+    keyword_score: float | None = None
+    rrf_score: float | None = None
+    rerank_score: float | None = None
     metadata: dict[str, Any] = Field(
         default_factory=dict,
         description="source, page and chunk_index, plus whatever the uploader attached.",
@@ -108,6 +112,8 @@ class SearchResponse(BaseModel):
     threshold: float
     top_k: int
     took_ms: int
+    rerank_ms: int | None = None
+    rrf_k: int | None = None
 
 
 class ContextRequest(SearchRequest):
@@ -158,3 +164,103 @@ class RagHealthResponse(BaseModel):
     configuration: dict[str, Any]
     database: dict[str, Any]
     embeddings: dict[str, Any]
+
+
+class MessageTurn(BaseModel):
+    role: Literal["user", "assistant", "system"]
+    content: str
+
+
+class AskRequest(BaseModel):
+    query: str = Field(min_length=1, description="The natural-language question.")
+    tenant_id: str | None = Field(
+        default=None,
+        description="Tenant identifier for multi-tenant data isolation.",
+    )
+    user_id: str | None = Field(default=None, description="Optional user scope.")
+    agent_id: str | None = Field(default=None, description="Optional agent scope.")
+    conversation_id: str | None = Field(
+        default=None, description="Optional conversation thread identifier."
+    )
+    collection_id: str | None = Field(
+        default=None, description="Optional collection identifier."
+    )
+    document_id: str | None = Field(
+        default=None, description="Optional single document scope."
+    )
+    document_ids: list[str] | None = Field(
+        default=None, description="Restrict retrieval to these document IDs."
+    )
+    top_k: int | None = Field(
+        default=None, ge=1, description="Number of final context chunks to retrieve."
+    )
+    threshold: float | None = Field(
+        default=None, ge=0.0, le=1.0,
+        description="Minimum similarity threshold for retrieval candidate filtering."
+    )
+    max_context_chars: int | None = Field(
+        default=None, ge=1,
+        description="Max total characters of reference context to supply to the LLM."
+    )
+    conversation_history: list[MessageTurn] | None = Field(
+        default=None, description="Prior conversation turns for multi-turn Q&A."
+    )
+    model: str | None = Field(
+        default=None, description="Optional LLM model override."
+    )
+    temperature: float | None = Field(
+        default=None, ge=0.0, le=2.0, description="Optional sampling temperature."
+    )
+    system_prompt: str | None = Field(
+        default=None, description="Optional custom system prompt override."
+    )
+
+    @field_validator("query")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("query must not be empty or whitespace")
+        return value
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "query": "How are drivers alerted about new bookings?",
+                "top_k": 5,
+                "tenant_id": "tenant_123",
+            }
+        }
+    }
+
+
+class CitationSource(BaseModel):
+    source_id: str = Field(description="Reference identifier, e.g. [SOURCE 1]")
+    chunk_id: str
+    document_id: str
+    source: str = Field(description="The source filename or document label.")
+    page: int | None = Field(default=None, description="PDF page number, if available.")
+    chunk_index: int | None = Field(default=None, description="0-based chunk index.")
+
+
+class LatencyMetrics(BaseModel):
+    retrieval_ms: int = 0
+    rerank_ms: int = 0
+    llm_ms: int = 0
+    total_ms: int = 0
+
+
+class RetrievalSummary(BaseModel):
+    top_k: int
+    rrf_k: int | None = None
+    chunks_found: int = 0
+    chunks_used: int = 0
+    results: list[SearchResult] = Field(default_factory=list)
+
+
+class AskResponse(BaseModel):
+    query: str
+    answer: str
+    sources: list[CitationSource] = Field(default_factory=list)
+    retrieval: RetrievalSummary
+    latency: LatencyMetrics
+

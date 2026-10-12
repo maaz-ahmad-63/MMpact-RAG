@@ -49,6 +49,7 @@ CREATE INDEX IF NOT EXISTS rag_documents_agent_idx        ON {{SCHEMA}}.rag_docu
 CREATE INDEX IF NOT EXISTS rag_documents_conversation_idx ON {{SCHEMA}}.rag_documents (conversation_id);
 CREATE INDEX IF NOT EXISTS rag_documents_created_idx      ON {{SCHEMA}}.rag_documents (created_at DESC);
 CREATE INDEX IF NOT EXISTS rag_chunks_document_idx        ON {{SCHEMA}}.rag_chunks (document_id);
+CREATE INDEX IF NOT EXISTS rag_chunks_content_fts_idx      ON {{SCHEMA}}.rag_chunks USING gin (to_tsvector('english', content));
 
 -- The vector index.
 --

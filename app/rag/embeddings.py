@@ -41,15 +41,19 @@ import logging
 import time
 from typing import Sequence
 
+from .cloudflare_ai import (
+    CloudflareAIError,
+    CloudflareAuthError,
+    CloudflareModelError,
+    CloudflareQuotaExhaustedError,
+    EmbeddingError,
+    embed_texts_cloudflare,
+)
 from .config import RagSettings, rag_settings
 
 logger = logging.getLogger(__name__)
 
 _PROBE = "dimension probe"
-
-
-class EmbeddingError(Exception):
-    """The embedding backend could not produce vectors. -> HTTP 502."""
 
 
 class Embedder:
@@ -58,7 +62,7 @@ class Embedder:
     def __init__(self, settings: RagSettings | None = None) -> None:
         self._settings = settings or rag_settings
         self._model = None  # sentence-transformers instance, local backend only
-        self._client = None  # httpx.AsyncClient, http backend only
+        self._client = None  # httpx.AsyncClient, http / cloudflare backend
         self._dimension: int | None = None
         self._lock = asyncio.Lock()
 
@@ -70,6 +74,8 @@ class Embedder:
 
     @property
     def model_name(self) -> str:
+        if self.backend == "cloudflare":
+            return self._settings.cloudflare_embedding_model
         return self._settings.embedding_model
 
     @property
@@ -95,6 +101,8 @@ class Embedder:
             started = time.perf_counter()
             if self.backend == "local":
                 await self._load_local()
+            elif self.backend == "cloudflare":
+                self._open_cloudflare_client()
             else:
                 self._open_http_client()
 
@@ -166,6 +174,20 @@ class Embedder:
             timeout=self._settings.embedding_timeout_s, headers=headers
         )
 
+    def _open_cloudflare_client(self) -> None:
+        import httpx
+
+        self._settings.validate_cloudflare_config("embeddings")
+        headers = {
+            "Authorization": f"Bearer {self._settings.cloudflare_api_token.strip()}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "MMpact-RAG-Inference-Client/1.0",
+        }
+        self._client = httpx.AsyncClient(
+            timeout=self._settings.cloudflare_timeout_s, headers=headers
+        )
+
     # -- embedding ----------------------------------------------------------
 
     async def embed_text(self, text: str) -> list[float]:
@@ -211,7 +233,21 @@ class Embedder:
     async def _embed_raw(self, batch: list[str]) -> list[list[float]]:
         if self.backend == "local":
             return await self._embed_local(batch)
+        if self.backend == "cloudflare":
+            return await self._embed_cloudflare(batch)
         return await self._embed_http(batch)
+
+    async def _embed_cloudflare(self, batch: list[str]) -> list[list[float]]:
+        if self._client is None:
+            self._open_cloudflare_client()
+        try:
+            return await embed_texts_cloudflare(
+                batch, self._settings, client=self._client
+            )
+        except (CloudflareQuotaExhaustedError, CloudflareAuthError, CloudflareAIError) as error:
+            if isinstance(error, EmbeddingError):
+                raise
+            raise EmbeddingError(str(error)) from error
 
     async def _embed_local(self, batch: list[str]) -> list[list[float]]:
         model = self._model
